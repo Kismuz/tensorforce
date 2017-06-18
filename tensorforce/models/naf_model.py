@@ -27,253 +27,141 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import numpy as np
 import tensorflow as tf
 from six.moves import xrange
 from tensorflow.contrib.framework import get_variables
 
-from tensorforce.models import Model
-from tensorforce.models.neural_networks import NeuralNetwork
-from tensorforce.models.neural_networks.layers import linear
-from tensorforce.util.experiment_util import global_seed
-
-from tensorforce.default_configs import NAFModelConfig
+from tensorforce.core import Model
+from tensorforce.core.networks import NeuralNetwork, layers
 
 
 class NAFModel(Model):
-    default_config = NAFModelConfig
 
-    def __init__(self, config, scope, define_network=None):
+    default_config = dict(
+        update_target_weight=1.0,
+        clip_gradients=0.0
+    )
+    allows_discrete_actions = False
+    allows_continuous_actions = True
+
+    def __init__(self, config):
         """
         Training logic for NAFs.
 
         :param config: Configuration parameters
         """
-        super(NAFModel, self).__init__(config, scope)
-        self.action_count = self.config.actions
-        self.tau = self.config.tau
-        self.epsilon = self.config.epsilon
-        self.gamma = self.config.gamma
-        self.batch_size = self.config.batch_size
+        config.default(NAFModel.default_config)
+        super(NAFModel, self).__init__(config)
 
-        self.state_shape = tuple(self.config.state_shape)
-        self.state = tf.placeholder(tf.float32, (None, None) + self.state_shape, name="state")
-        self.next_states = tf.placeholder(tf.float32, (None, None) + self.state_shape,
-                                          name="next_states")
-        self.actions = tf.placeholder(tf.float32, (None, None, self.action_count), name='actions')
-        self.terminals = tf.placeholder(tf.float32, (None, None), name='terminals')
-        self.rewards = tf.placeholder(tf.float32, (None, None), name='rewards')
-
-        self.q_targets = tf.placeholder(tf.float32, (None, None), name='q_targets')
-        self.target_network_update = []
-        self.episode = 0
+    def create_tf_operations(self, config):
+        super(NAFModel, self).create_tf_operations(config)
 
         # Get hidden layers from network generator, then add NAF outputs, same for target network
-        scope = '' if self.config.tf_scope is None else self.config.tf_scope + '-'
+        with tf.variable_scope('training'):
+            self.training_network = NeuralNetwork(config.network, inputs=self.state)
+            self.internal_inputs.extend(self.training_network.internal_inputs)
+            self.internal_outputs.extend(self.training_network.internal_outputs)
+            self.internal_inits.extend(self.training_network.internal_inits)
 
-        if define_network is None:
-            define_network = NeuralNetwork.layered_network(self.config.network_layers)
-
-        self.training_network = NeuralNetwork(define_network, [self.state], episode_length=self.episode_length,
-                                              scope=scope + 'training')
-        self.target_network = NeuralNetwork(define_network, [self.next_states], episode_length=self.episode_length,
-                                            scope=scope + 'target')
-
-        self.training_internal_states = self.training_network.internal_state_inits
-        self.target_internal_states = self.target_network.internal_state_inits
-
-        # Create output fields
-        self.training_v, self.mu, self.advantage, self.q, self.training_output_vars = self.create_outputs(
-            self.training_network.output, 'outputs_training')
-        self.target_v, _, _, _, self.target_output_vars = self.create_outputs(self.target_network.output,
-                                                                              'outputs_target')
-        self.create_training_operations()
-        self.saver = tf.train.Saver()
-        self.writer = tf.summary.FileWriter('logs', graph=tf.get_default_graph())
-
-        self.session.run(tf.global_variables_initializer())
-
-    def get_action(self, state, episode=1):
-        """
-        Returns naf action(s) as given by the mean output of the network.
-
-        :param state: Current state
-        :param episode: Current episode
-        :return: action
-        """
-        fetches = [self.mu]
-        fetches.extend(self.training_internal_states)
-        fetches.extend(self.target_internal_states)
-
-        feed_dict = {self.episode_length: [1], self.state: [(state, )]}
-
-        feed_dict.update({training_internal_state: self.training_network.internal_state_inits[n] for n, training_internal_state in
-                          enumerate(self.training_network.internal_state_inputs)})
-
-        feed_dict.update({target_internal_state: self.target_network.internal_state_inits[n] for n, target_internal_state in
-                          enumerate(self.target_network.internal_state_inputs)})
-
-        print('feed dict)')
-        for e in feed_dict.items():
-            print(e)
-
-        print('fetches list)')
-        for e in fetches:
-            print(e)
-
-        fetched = self.session.run(fetches, feed_dict)
-
-        action = fetched[0][0] + self.exploration(episode, self.total_states)
-
-        # Update optional internal states, e.g. LSTM cells)
-        self.training_internal_states = fetched[1:len(self.training_internal_states)]
-        self.target_internal_states = fetched[1 + len(self.training_internal_states):]
-
-        self.total_states += 1
-
-        return action
-
-    def update(self, batch):
-        """
-        Executes a NAF update on a training batch.
-
-        :param batch:=
-        :return:
-        """
-        float_terminals = batch['terminals'].astype(float)
-
-        q_targets = batch['rewards'] + (1. - float_terminals) * self.gamma * \
-                                       self.get_target_value_estimate(batch['next_states'])
-
-        feed_dict = {
-            self.episode_length: [len(batch['rewards'])],
-            self.q_targets: q_targets,
-            self.actions: [batch['actions']],
-            self.state: [batch['states']]}
-
-        fetches = [self.optimize_op, self.loss, self.training_v, self.advantage, self.q]
-        fetches.extend(self.training_network.internal_state_outputs)
-        fetches.extend(self.target_network.internal_state_outputs)
-
-        for n, internal_state in enumerate(self.training_network.internal_state_inputs):
-            feed_dict[internal_state] = self.training_internal_states[n]
-
-        for n, internal_state in enumerate(self.target_network.internal_state_inputs):
-            feed_dict[internal_state] = self.target_internal_states[n]
-
-        fetched = self.session.run(fetches, feed_dict)
-
-        self.training_internal_states = fetched[5:5 + len(self.training_internal_states)]
-        self.target_internal_states = fetched[5 + len(self.training_internal_states):]
-
-    def create_outputs(self, last_hidden_layer, scope):
-        """
-        Creates NAF specific outputs.
-
-        :param last_hidden_layer: Points to last hidden layer
-        :param scope: TF name scope
-
-        :return Output variables and all TF variables created in this scope
-        """
-
-        with tf.name_scope(scope):
-            # State-value function
-            v = linear(last_hidden_layer, {'num_outputs': 1, 'weights_regularizer': self.config.weights_regularizer,
-                                           'weights_regularizer_args': [self.config.weights_regularizer_args]},
-                       scope + 'v')
-            v = tf.reshape(v, [-1, 1])
-
+        with tf.variable_scope('training_outputs'):
+            num_actions = len(self.action)
             # Action outputs
-            mu = linear(last_hidden_layer,
-                        {'num_outputs': self.action_count, 'weights_regularizer': self.config.weights_regularizer,
-                         'weights_regularizer_args': [self.config.weights_regularizer_args]}, scope + 'mu')
-            mu = tf.reshape(mu, [-1, self.action_count])
+            mean = layers['linear'](x=self.training_network.output, size=num_actions)
+            for n, action in enumerate(sorted(self.action)):
+                # mean = tf.Print(mean,[mean])
+                self.action_taken[action] = mean[n]
 
             # Advantage computation
             # Network outputs entries of lower triangular matrix L
-            lower_triangular_size = int(self.action_count * (self.action_count + 1) / 2)
+            lower_triangular_size = num_actions * (num_actions + 1) // 2
+            l_entries = layers['linear'](x=self.training_network.output, size=lower_triangular_size)
 
-            l_entries = linear(last_hidden_layer, {'num_outputs': lower_triangular_size,
-                                                   'weights_regularizer': self.config.weights_regularizer,
-                                                   'weights_regularizer_args': [self.config.weights_regularizer_args]},
-                               scope + 'l')
+            l_matrix = tf.exp(tf.map_fn(tf.diag, l_entries[:, :num_actions]))
 
-            # Reshape from (?, ?, lower_triangular_size)
-            l_entries = tf.reshape(l_entries, [-1, lower_triangular_size])
-
-
-            # Iteratively construct matrix. Extra verbose comment here
-            l_rows = []
-            offset = 0
-
-            for i in xrange(self.action_count):
-                # Diagonal elements are exponentiated, otherwise gradient often 0
-                # Slice out lower triangular entries from flat representation through moving offset
-
-                diagonal = tf.exp(tf.slice(l_entries, (0, offset), (-1, 1)))
-
-                n = self.action_count - i - 1
-                # Slice out non-zero non-diagonal entries, - 1 because we already took the diagonal
-                non_diagonal = tf.slice(l_entries, (0, offset + 1), (-1, n))
-
-                # Fill up row with zeros
-                row = tf.pad(tf.concat(axis=1, values=(diagonal, non_diagonal)), ((0, 0), (i, 0)))
-                offset += (self.action_count - i)
-                l_rows.append(row)
-
-            # Stack rows to matrix
-            l_matrix = tf.transpose(tf.stack(l_rows, axis=1), (0, 2, 1))
+            if num_actions > 1:
+                offset = num_actions
+                l_columns = list()
+                for zeros, size in enumerate(xrange(num_actions - 1, 0, -1), 1):
+                    column = tf.pad(l_entries[:, offset: offset + size], ((0, 0), (zeros, 0)))
+                    l_columns.append(column)
+                    offset += size
+                l_matrix += tf.stack(l_columns, 1)
 
             # P = LL^T
             p_matrix = tf.matmul(l_matrix, tf.transpose(l_matrix, (0, 2, 1)))
+            # p_matrix = tf.Print(p_matrix, [p_matrix])
 
-            # Need to adjust dimensions to multiply with P.
-            # TODO see if this can be done simpler
-            actions = tf.reshape(self.actions, [-1, self.action_count])
-            action_diff = tf.expand_dims(actions - mu, -1)
+            # l_rows = []
+            # offset = 0
+            # for i in xrange(num_actions):
+            #     # Diagonal elements are exponentiated, otherwise gradient often 0
+            #     # Slice out lower triangular entries from flat representation through moving offset
+            #     diagonal = tf.exp(l_entries[:, offset])  # tf.slice(l_entries, (0, offset), (-1, 1))
+            #     n = config.actions - i - 1
+            #     # Slice out non-zero non-diagonal entries, - 1 because we already took the diagonal
+            #     non_diagonal = l_entries[:, offset + 1: offset + n + 1]  # tf.slice(l_entries, (0, offset + 1), (-1, n))
+            #     # Fill up row with zeros
+            #     row = tf.pad(tf.concat(axis=1, values=(diagonal, non_diagonal)), ((0, 0), (i, 0)))
+            #     offset += (num_actions - i)
+            #     l_rows.append(row)
+            #
+            # # Stack rows to matrix
+            # l_matrix = tf.transpose(tf.stack(l_rows, axis=1), (0, 2, 1))
 
-            # A = -0.5 (a - mu)P(a - mu)
-            advantage = -0.5 * tf.matmul(tf.transpose(action_diff, [0, 2, 1]),
-                                         tf.matmul(p_matrix, action_diff))
-            advantage = tf.reshape(advantage, [-1, 1])
+            actions = tf.stack(values=[self.action[name] for name in sorted(self.action)], axis=1)
+            action_diff = actions - mean
 
-            with tf.name_scope('q_values'):
-                # Q = A + V
-                q_value = v + advantage
+            # A = -0.5 (a - mean)P(a - mean)
+            advantage = -tf.matmul(tf.expand_dims(action_diff, 1), tf.matmul(p_matrix, tf.expand_dims(action_diff, 2))) / 2
+            advantage = tf.squeeze(advantage, 2)
 
-        # Get all variables under this scope for target network update
-        return v, mu, advantage, q_value, get_variables(scope)
+            # Q = A + V
+            # State-value function
+            value = layers['linear'](x=self.training_network.output, size=1)
+            q_value = tf.squeeze(value + advantage, 1)
+            training_output_vars = get_variables('training_outputs')
 
-    def create_training_operations(self):
-        """
-        NAF update logic.
-        """
+        with tf.variable_scope('target'):
+            self.target_network = NeuralNetwork(config.network, inputs=self.state)
+            self.internal_inputs.extend(self.target_network.internal_inputs)
+            self.internal_outputs.extend(self.target_network.internal_outputs)
+            self.internal_inits.extend(self.target_network.internal_inits)
+            target_value = dict()
+
+        with tf.variable_scope('target_outputs'):
+            # State-value function
+            target_value_output = layers['linear'](x=self.target_network.output, size=1)
+            for action in self.action:
+                # Naf directly outputs V(s)
+                target_value[action] = target_value_output
+
+            target_output_vars = get_variables('target_outputs')
 
         with tf.name_scope("update"):
-            # MSE
-            self.loss = tf.reduce_mean(tf.squared_difference(self.q_targets, tf.squeeze(self.q)),
-                                       name='loss')
-            self.optimize_op = self.optimizer.minimize(self.loss)
+            for action in self.action:
+                q_target = self.reward[:-1] + (1.0 - tf.cast(self.terminal[:-1], tf.float32)) * config.discount\
+                                              * target_value[action][1:]
+                delta = q_target - q_value[:-1]
+
+                # We observe issues with numerical stability in some tests, gradient clipping can help
+                if config.clip_gradients > 0.0:
+                    huber_loss = tf.where(tf.abs(delta) < config.clip_gradients, tf.multiply(tf.square(delta), 0.5),
+                                          tf.abs(delta) - 0.5)
+                    loss = tf.reduce_mean(huber_loss)
+                else:
+                    loss = tf.reduce_mean(tf.square(delta))
+                # loss = tf.Print(loss, [loss])
+                tf.losses.add_loss(loss)
 
         with tf.name_scope("update_target"):
             # Combine hidden layer variables and output layer variables
-            self.training_vars = self.training_network.variables + self.training_output_vars
-            self.target_vars = self.target_network.variables + self.target_output_vars
+            training_vars = self.training_network.variables + training_output_vars
+            target_vars = self.target_network.variables + target_output_vars
 
-            for v_source, v_target in zip(self.training_vars, self.target_vars):
-                update = v_target.assign_sub(self.tau * (v_target - v_source))
-
+            self.target_network_update = list()
+            for v_source, v_target in zip(training_vars, target_vars):
+                update = v_target.assign_sub(config.update_target_weight * (v_target - v_source))
                 self.target_network_update.append(update)
-
-    def get_target_value_estimate(self, next_states):
-        """
-        Estimate of next state V value through target network.
-
-        :param next_states:
-        :return:
-        """
-
-        return self.session.run(self.target_v, {self.next_states: [next_states]})
 
     def update_target_network(self):
         """

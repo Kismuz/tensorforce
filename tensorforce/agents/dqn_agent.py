@@ -23,15 +23,24 @@ from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import division
 
-from tensorforce.agents import MemoryAgent
+from tensorforce.core import MemoryAgent
 from tensorforce.models import DQNModel
-
-from tensorforce.default_configs import DQNAgentConfig
 
 
 class DQNAgent(MemoryAgent):
+
     name = 'DQNAgent'
-
-    default_config = DQNAgentConfig
-
     model = DQNModel
+    default_config = dict(
+        target_update_frequency=10000
+    )
+
+    def __init__(self, config):
+        config.default(MemoryAgent.default_config)
+        super(DQNAgent, self).__init__(config)
+        self.target_update_frequency = config.target_update_frequency
+
+    def observe(self, state, action, reward, terminal):
+        super(DQNAgent, self).observe(state=state, action=action, reward=reward, terminal=terminal)
+        if self.timestep >= self.first_update and self.timestep % self.target_update_frequency == 0:
+            self.model.update_target()

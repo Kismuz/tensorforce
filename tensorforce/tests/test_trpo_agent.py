@@ -16,116 +16,83 @@
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import division
-import tensorflow as tf
-import unittest
 
+import unittest
 from six.moves import xrange
 
-from tensorforce.config import create_config
-from tensorforce.models.neural_networks import NeuralNetwork
+from tensorforce import Configuration
 from tensorforce.agents import TRPOAgent
+from tensorforce.core.networks import layered_network_builder
+from tensorforce.environments.minimal_test import MinimalTest
+from tensorforce.execution import Runner
 
 
 class TestTRPOAgent(unittest.TestCase):
-    def test_trpo_agent(self):
 
-        config = {
-            'batch_size': 16,
-            "override_line_search": False,
-            "cg_iterations": 20,
-            "use_gae": False,
-            "normalize_advantage": False,
-            "gae_lambda": 0.97,
-            "cg_damping": 0.001,
-            "line_search_steps": 20,
-            'max_kl_divergence': 0.05,
-            'max_episode_length': 4,
-            'continuous': False,
-            'state_shape': (2,),
-            'actions': 2,
-            'gamma': 0.99
-        }
+    def test_discrete(self):
+        passed = 0
 
-        config = create_config(config)
-        tf.reset_default_graph()
+        # TRPO can occasionally have numerical issues so we allow for 1 in 5 to fail on Travis
+        for _ in xrange(5):
+            environment = MinimalTest(continuous=False)
+            config = Configuration(
+                batch_size=8,
+                learning_rate=0.0001,
+                cg_iterations=20,
+                cg_damping=0.001,
+                line_search_steps=20,
+                max_kl_divergence=0.05,
+                states=environment.states,
+                actions=environment.actions,
+                network=layered_network_builder([dict(type='dense', size=32)])
+            )
+            agent = TRPOAgent(config=config)
+            runner = Runner(agent=agent, environment=environment)
 
-        network_builder = NeuralNetwork.layered_network(layers=[{'type': 'dense',
-                                                                 'num_outputs': 8}])
-        agent = TRPOAgent(config=config, network_builder=network_builder)
+            def episode_finished(r):
+                return r.episode < 100 or not all(x >= 1.0 for x in r.episode_rewards[-100:])
 
-        state = (1, 0)
-        rewards = [0.0] * 100
+            runner.run(episodes=10000, episode_finished=episode_finished)
+            print('TRPO Agent (discrete): ' + str(runner.episode))
 
-        for n in xrange(10000):
-            action = agent.get_action(state=state)
-            if action == 0:
-                state = (1, 0)
-                reward = 0.0
-                terminal = False
+            if runner.episode < 10000:
+                passed += 1
+                print('passed')
             else:
-                state = (0, 1)
-                reward = 1.0
-                terminal = True
-            agent.add_observation(state=state, action=action, reward=reward, terminal=terminal)
-            rewards[n % 100] = reward
+                print('failed')
 
-            if sum(rewards) == 100.0:
-                print('Steps until passed = {:d}'.format(n))
+        print('TRPO discrete agent passed = {}'.format(passed))
+        self.assertTrue(passed >= 4)
 
-                return
-        print('sum = {:f}'.format(sum(rewards)))
-        #TODO investigate 3.5/3.6 slowness
+    def test_continuous(self):
+        passed = 0
 
-        # self.assertTrue(False)
+        for _ in xrange(5):
+            environment = MinimalTest(continuous=True)
+            config = Configuration(
+                batch_size=8,
+                cg_iterations=20,
+                cg_damping=0.001,
+                line_search_steps=20,
+                max_kl_divergence=0.05,
+                states=environment.states,
+                actions=environment.actions,
+                network=layered_network_builder([dict(type='dense', size=32)])
+            )
+            agent = TRPOAgent(config=config)
+            runner = Runner(agent=agent, environment=environment)
 
+            def episode_finished(r):
+                return r.episode < 100 or not all(x >= 1.0 for x in r.episode_rewards[-100:])
 
-    def test_trpo_agent_continuous(self):
+            runner.run(episodes=10000, episode_finished=episode_finished)
+            print('TRPO Agent (continuous): ' + str(runner.episode))
 
-        config = {
-            'batch_size': 16,
-            "override_line_search": False,
-            "cg_iterations": 20,
-            "use_gae": False,
-            "normalize_advantage": False,
-            "gae_lambda": 0.97,
-            "cg_damping": 0.001,
-            "line_search_steps": 20,
-            'max_kl_divergence': 0.05,
-            'max_episode_length': 4,
-            'continuous': True,
-            'state_shape': (2,),
-            'actions': 1,
-            'gamma': 0.99
-        }
-
-        config = create_config(config)
-        tf.reset_default_graph()
-
-        network_builder = NeuralNetwork.layered_network(layers=[{'type': 'dense',
-                                                                 'num_outputs': 8}])
-        agent = TRPOAgent(config=config, network_builder=network_builder)
-
-        state = (1, 0)
-        rewards = [0.0] * 100
-
-        for n in xrange(50000):
-            action = agent.get_action(state=state)
-            if action >= -1.0 and action <= 1.0:
-                state = (1, 0)
-                reward = 0.0
-                terminal = False
+            if runner.episode < 10000:
+                passed += 1
+                print('passed')
             else:
-                state = (0, 1)
-                reward = 1.0
-                terminal = True
-            agent.add_observation(state=state, action=action, reward=reward, terminal=terminal)
-            rewards[n % 100] = reward
+                print('failed')
 
-            if sum(rewards) == 100.0:
-                print('Steps until passed = {:d}'.format(n))
-
-                return
-        print('sum = {:f}'.format(sum(rewards)))
-        #TODO investigate 3.5/3.6 slowness
-
-        # self.assertTrue(False)
+        print('TRPO continuous agent passed = {}'.format(passed))
+        self.assertTrue(passed >= 4)

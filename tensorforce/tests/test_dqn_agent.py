@@ -16,64 +16,49 @@
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import division
-import tensorflow as tf
 
 import unittest
 from six.moves import xrange
 
-from tensorforce.config import create_config
-from tensorforce.models.neural_networks import NeuralNetwork
+
+from tensorforce import Configuration
 from tensorforce.agents import DQNAgent
+from tensorforce.core.networks import layered_network_builder
+from tensorforce.environments.minimal_test import MinimalTest
+from tensorforce.execution import Runner
+
 
 class TestDQNAgent(unittest.TestCase):
 
-    def test_dqn_agent(self):
-        config = {
-            'seed': 10,
-            'batch_size': 16,
-            'state_shape': (2,),
-            'actions': 2,
-            'action_shape': (),
-            'update_rate': 1,
-            'update_repeat': 4,
-            'min_replay_size': 50,
-            'memory_capacity': 50,
-            "exploration": "epsilon_decay",
-            "exploration_param": {
-                "epsilon": 1,
-                "epsilon_final": 0,
-                "epsilon_states": 50
-            },
-            'target_network_update_rate': 1.0 ,
-            'use_target_network': True,
-            "alpha": 0.0005,
-            "gamma": 0.99,
-            "tau": 1.0
-        }
+    def test_discrete(self):
+        passed = 0
 
-        tf.reset_default_graph()
-        tf.set_random_seed(10)
+        for _ in xrange(5):
+            environment = MinimalTest(continuous=False)
+            config = Configuration(
+                batch_size=8,
+                learning_rate=0.001,
+                memory_capacity=800,
+                first_update=80,
+                repeat_update=4,
+                target_update_frequency=20,
+                states=environment.states,
+                actions=environment.actions,
+                network=layered_network_builder([dict(type='dense', size=32)])
+            )
+            agent = DQNAgent(config=config)
+            runner = Runner(agent=agent, environment=environment)
 
-        config = create_config(config)
-        network_builder = NeuralNetwork.layered_network(layers=[{'type': 'dense', 'num_outputs': 16}, {'type': 'linear', 'num_outputs': 2}])
-        agent = DQNAgent(config=config, network_builder=network_builder)
+            def episode_finished(r):
+                return r.episode < 100 or not all(x >= 1.0 for x in r.episode_rewards[-100:])
 
-        state = (1, 0)
-        rewards = [0.0] * 100
-        for n in xrange(10000):
-            action = agent.get_action(state=state)
-            if action == 0:
-                state = (1, 0)
-                reward = 0.0
-                terminal = False
+            runner.run(episodes=5000, episode_finished=episode_finished)
+            print('DQN Agent: ' + str(runner.episode))
+            if runner.episode < 5000:
+                passed += 1
+                print('passed')
             else:
-                state = (0, 1)
-                reward = 1.0
-                terminal = False
-            agent.add_observation(state=state, action=action, reward=reward, terminal=terminal)
-            rewards[n % 100] = reward
+                print('failed')
 
-            if sum(rewards) == 100.0:
-                return
-
-        assert(sum(rewards) == 100.0)
+        print('DQN Agent passed = {}'.format(passed))
+        self.assertTrue(passed >= 4)

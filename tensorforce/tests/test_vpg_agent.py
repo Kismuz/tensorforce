@@ -16,91 +16,74 @@
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import division
-import tensorflow as tf
 
 import unittest
 from six.moves import xrange
 
-from tensorforce.config import create_config
-from tensorforce.models.neural_networks import NeuralNetwork
+from tensorforce import Configuration
 from tensorforce.agents import VPGAgent
+from tensorforce.core.networks import layered_network_builder
+from tensorforce.environments.minimal_test import MinimalTest
+from tensorforce.execution import Runner
 
 
 class TestVPGAgent(unittest.TestCase):
 
-    def test_vpg_agent(self):
+    def test_discrete(self):
+        passed = 0
 
-        config = {
-            'seed': 12,
-            'batch_size': 8,
-            'max_episode_length': 4,
-            'continuous': False,
-            'state_shape': (2,),
-            'actions': 2
-        }
+        for _ in xrange(5):
+            environment = MinimalTest(continuous=False)
+            config = Configuration(
+                batch_size=8,
+                learning_rate=0.001,
+                states=environment.states,
+                actions=environment.actions,
+                network=layered_network_builder([dict(type='dense', size=32)])
+            )
+            agent = VPGAgent(config=config)
+            runner = Runner(agent=agent, environment=environment)
 
-        tf.reset_default_graph()
+            def episode_finished(r):
+                return r.episode < 100 or not all(x >= 1.0 for x in r.episode_rewards[-100:])
 
-        config = create_config(config)
-        network_builder = NeuralNetwork.layered_network(layers=[{'type': 'dense', 'num_outputs': 16}])
+            runner.run(episodes=10000, episode_finished=episode_finished)
+            print('VPG Agent (discrete): ' + str(runner.episode))
 
-        agent = VPGAgent(config=config, network_builder=network_builder)
-
-        state = (1, 0)
-        rewards = [0.0] * 100
-        for n in xrange(10000):
-            action = agent.get_action(state=state)
-            if action == 0:
-                state = (1, 0)
-                reward = 0.0
-                terminal = False
+            if runner.episode < 10000:
+                passed += 1
+                print('passed')
             else:
-                state = (0, 1)
-                reward = 1.0
-                terminal = True
-            agent.add_observation(state=state, action=action, reward=reward, terminal=terminal)
-            rewards[n % 100] = reward
-            if sum(rewards) == 100.0:
-                return
+                print('failed')
 
-        print("Did not reach goal of 100 consecutive correct actions (got {})".format(sum(rewards)))
-        self.assertTrue(False)
+        print('VPG discrete agent passed = {}'.format(passed))
+        self.assertTrue(passed >= 4)
 
+    def test_continuous(self):
+        passed = 0
 
-    def test_vpg_agent_continuous(self):
+        for _ in xrange(5):
+            environment = MinimalTest(continuous=True)
+            config = Configuration(
+                batch_size=8,
+                learning_rate=0.001,
+                states=environment.states,
+                actions=environment.actions,
+                network=layered_network_builder([dict(type='dense', size=32)])
+            )
+            agent = VPGAgent(config=config)
+            runner = Runner(agent=agent, environment=environment)
 
-        config = {
-            'seed': 12,
-            'batch_size': 8,
-            'max_episode_length': 4,
-            'continuous': True,
-            'state_shape': (2,),
-            'actions': 1
-        }
+            def episode_finished(r):
+                return r.episode < 100 or not all(x >= 1.0 for x in r.episode_rewards[-100:])
 
-        tf.reset_default_graph()
-
-        config = create_config(config)
-        network_builder = NeuralNetwork.layered_network(layers=[{'type': 'dense', 'num_outputs': 16}])
-
-        agent = VPGAgent(config=config, network_builder=network_builder)
-
-        state = (1, 0)
-        rewards = [0.0] * 100
-        for n in xrange(50000):
-            action = agent.get_action(state=state)
-            if action >= -1.0 and action <= 1.0:
-                state = (1, 0)
-                reward = 0.0
-                terminal = False
+            runner.run(episodes=5000, episode_finished=episode_finished)
+            print('VPG Agent (continuous): ' + str(runner.episode))
+            if runner.episode < 5000:
+                passed += 1
+                print('passed')
             else:
-                state = (0, 1)
-                reward = 1.0
-                terminal = True
-            agent.add_observation(state=state, action=action, reward=reward, terminal=terminal)
-            rewards[n % 100] = reward
-            if sum(rewards) == 100.0:
-                return
+                print('failed')
 
-        print("Did not reach goal of 100 consecutive correct actions (got {})".format(sum(rewards)))
-        self.assertTrue(False)
+        print('VPG continuous agent passed = {}'.format(passed))
+        self.assertTrue(passed >= 4)

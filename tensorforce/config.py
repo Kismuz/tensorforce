@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-"""
-Configuration class that extends dict and reads configuration files 
-(currently only json)
-"""
 
 from __future__ import absolute_import
 from __future__ import print_function
@@ -25,48 +21,64 @@ from __future__ import division
 import os
 import json
 
+from tensorforce import TensorForceError
 
-class Config(dict):
-    def __getattr__(self, item):
-        return self.get(item)
 
-    def __setattr__(self, item, value):
-        self[item] = value
+class Configuration(object):
+    """Configuration class that extends dict and reads configuration files (currently only json)
+    """
 
-    def __add__(self, other):
-        result = Config(self.items())
-        result.update(other)
-        return result
+    def __init__(self, **kwargs):
+        self._config = dict(**kwargs)
 
-    def read_json(self, filename):
-        """
-        Read configuration from json file
-
-        :param filename: path of configuration file
-        """
+    @staticmethod
+    def from_json(filename):
         path = os.path.join(os.getcwd(), filename)
+        with open(path, 'r') as fp:
+            config = json.load(fp=fp)
+        return Configuration(**config)
 
-        # don't catch, we let open() and json.loads() raise their own exceptions
-        with open(path, 'r') as f:
-            self.update(json.loads(f.read()))
+    def __str__(self):
+        return '{' + ', '.join('{}={}'.format(key, value) for key, value in self._config.items()) + '}'
 
+    def __iter__(self):
+        return iter(self._config.items())
 
-def create_config(values, default=None):
-    """
-    Create Config object from dict. Use default dict for default values.
+    def items(self):
+        return self._config.items()
 
-    :param values: dict containing actual values
-    :param default: dict containing default values or string pointing to default file
-    :return: Config object
-    """
-    if default:
-        if isinstance(default, dict):
-            default_data = default
+    def __contains__(self, name):
+        return name in self._config
+
+    def __getattr__(self, name):
+        if name not in self._config:
+            raise TensorForceError('Value for `{}` is not defined.'.format(name))
+        return self._config[name]
+
+    def __setattr__(self, name, value):
+        if name == '_config':
+            value = {k: Configuration(**v) if isinstance(v, dict) else v for k, v in value.items()}
+            super(Configuration, self).__setattr__(name, value)
+            return
+        if name not in self._config:
+            raise TensorForceError('Value is not defined.')
+        elif isinstance(value, dict):
+            self._config[name] = Configuration(**value)
         else:
-            raise ValueError("Invalid default config data.")
-        config = Config(default)
-        if values:
-            config.update(values)
-    else:
-        config = Config(values)
-    return config
+            self._config[name] = value
+
+    def keys(self):
+        return self._config.keys()
+
+    def __getitem__(self, name):
+        return self._config[name]
+
+    def copy(self):
+        return Configuration(**self._config)
+
+    def default(self, default):
+        for key, value in default.items():
+            if key not in self._config:
+                if isinstance(value, dict):
+                    value = Configuration(**value)
+                self._config[key] = value

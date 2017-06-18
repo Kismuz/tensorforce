@@ -1,0 +1,11 @@
+{
+  "loglevel": "debug",
+  "learning_rate": 0.01,
+  "batch_size": 4000,
+  "normalize_advantage" : false,
+  "use_gae": false,
+  "gae_lambda": 0.97,
+  "gamma": 0.97,
+  "continuous": false,
+  "preprocessing": null
+}
